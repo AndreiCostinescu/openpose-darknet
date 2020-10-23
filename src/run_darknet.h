@@ -1,23 +1,12 @@
 #ifndef RUN_DARKNET_H
 #define RUN_DARKNET_H
 
-extern "C"
-{
+extern "C" {
 
-void init_net
-    (
-    char *cfgfile,
-    char *weightfile,
-    int *inw,
-    int *inh,
-    int *outw,
-    int *outh
-    );
+void initNet(char *cfgFile, char *weightFile, int *inW, int *inH, int *outW, int *outH);
 
-float *run_net
-    (
-    float *indata
-    );
+float *runNet(float *inData);
 
-}
+};
+
 #endif // RUN_DARKNET_H
