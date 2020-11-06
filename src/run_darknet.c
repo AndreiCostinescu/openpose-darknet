@@ -4,7 +4,7 @@
 static network *net;
 
 void initNet(char *cfgFile, char *weightFile, int *inW, int *inH, int *outW, int *outH) {
-    net = load_network_verbose(cfgFile, weightFile, 0, 0);
+    net = load_network_custom_verbose(cfgFile, weightFile, 0, 1, 1);
     set_batch_network(net, 1);
     *inW = net->w;
     *inH = net->h;

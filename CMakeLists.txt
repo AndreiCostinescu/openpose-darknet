@@ -8,7 +8,7 @@ include_directories("${DARKNET_DIR}/include")
 set(DARKNET_LIB "${DARKNET_DIR}/cmake-build-release/libdarknet.so")
 
 find_package(realsense2 REQUIRED)
-find_package(OpenCV REQUIRED)
+find_package(OpenCV 4.3 REQUIRED)
 
 message(STATUS "Adding OpenposeDarknet")
 add_executable(OpenposeDarknet src/main_modif.cpp src/run_darknet.c src/run_darknet.h)
