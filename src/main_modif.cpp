@@ -18,6 +18,9 @@ using namespace cv;
 #include <images/image_opencv.h>
 #include <network.h>
 
+#include <librealsense2/rs.hpp>  // rs.h is for C; rs.hpp is for C++...
+#include <images/realsense-opencv-helpers.hpp>
+
 #define POSE_MAX_PEOPLE 96
 #define MODEL 0
 
@@ -32,7 +35,7 @@ inline T fastMin(const T a, const T b) {
 }
 
 class OpenposePostProcessor {
-  public:
+public:
     OpenposePostProcessor() {
         OpenposePostProcessor::initialize();
     }
@@ -472,7 +475,7 @@ class OpenposePostProcessor {
         delete[] heatMap;
     }
 
-  private:
+private:
     static int INITIALIZED;
     static int MODEL_SIZE;
     static int NET_OUT_CHANNELS;
@@ -484,7 +487,7 @@ class OpenposePostProcessor {
         if (OpenposePostProcessor::INITIALIZED) {
             return;
         }
-        #if MODEL == 0
+#if MODEL == 0
         OpenposePostProcessor::MODEL_SIZE = 26;
 
         // size = 2 * model_size
@@ -506,7 +509,7 @@ class OpenposePostProcessor {
                 170, 0, 255, 255, 0, 255, 85, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 255, 255, 0, 255, 255,
                 0, 255, 255,
         };
-        #elif MODEL == 1
+#elif MODEL == 1
         OpenposePostProcessor::MODEL_SIZE = 19;
 
         // size = 2 * model_size
@@ -526,7 +529,7 @@ class OpenposePostProcessor {
                 255, 0, 85, 255, 0, 0, 255, 85, 0, 255, 170, 0, 255, 255, 0, 170, 255, 0, 85, 255, 0, 0, 255, 0, 0, 255, 85,
                 0, 255, 170, 0, 255, 255, 0, 170, 255, 0, 85, 255, 0, 0, 255, 255, 0, 170, 170, 0, 255, 255, 0, 255, 85, 0, 255,
         };
-        #endif
+#endif
 
         OpenposePostProcessor::NET_OUT_CHANNELS = 3 * OpenposePostProcessor::MODEL_SIZE;
         OpenposePostProcessor::INITIALIZED = 1;
@@ -541,14 +544,14 @@ vector<int> OpenposePostProcessor::BODY_PART_PAIRS;
 vector<float> OpenposePostProcessor::COLORS;
 
 class YoloPostProcessor {
-  public:
+public:
     YoloPostProcessor() {
         YoloPostProcessor::initialize();
     }
 
     static void postProcess(network *net, Mat &imageInput, layer lastDetectionLayer, int netInW, int netInH,
                             float scale, char **names, image **alphabet, float thresh = 0.25,
-                            float hierarchyThresh = 0.5, int letterBox = 0, int printDetections = 1) {
+                            float hierarchyThresh = 0.5, int letterBox = 0, int printDetections = 0) {
         initialize();
 
         int nrBoxes = 0;
@@ -579,7 +582,7 @@ class YoloPostProcessor {
         free_detections(detections, nrBoxes);
     }
 
-  private:
+private:
     static int INITIALIZED;
     static float NMS;
 
@@ -696,6 +699,50 @@ void cameraInput(network *net, int netInW, int netInH, int netOutW, int netOutH,
     delete[] netInData;
 }
 
+void realsenseInput(network *net, int netInW, int netInH, int netOutW, int netOutH, char **names, image **alphabet,
+                    layer lastDetectionLayer) {
+    try {
+        rs2::pipeline pipe;
+        auto config = pipe.start();
+        auto profile = config.get_stream(RS2_STREAM_COLOR).as<rs2::video_stream_profile>();
+        rs2::align alignTo(RS2_STREAM_COLOR);
+        cout << "Started RealSense pipeline!" << endl;
+
+        auto *netInData = new float[netInW * netInH * 3]();
+        unsigned long long lastFrameNumber = 0;
+        while (true) {
+            rs2::frameset currentFrame = pipe.wait_for_frames();
+            currentFrame = alignTo.process(currentFrame);  // Make sure the frames are spatially aligned
+            // rs2::depth_frame depth = currentFrame.get_depth_frame();
+            rs2::video_frame image = currentFrame.get_color_frame();
+
+            if (image.get_frame_number() == lastFrameNumber) continue;
+            lastFrameNumber = image.get_frame_number();
+
+            // auto depthMat = depth_frame_to_meters(depth);
+            auto imageMat = frame_to_mat(image);
+
+            float scale = 0.0;
+            preProcessImage(netInData, imageMat, netInW, netInH, scale);
+            processImage(net, netInData, imageMat, lastDetectionLayer, netInW, netInH, netOutW, netOutH, scale, names,
+                         alphabet);
+
+            // 11. show and save result
+            imshow("demo", imageMat);
+            int k = waitKey(1);
+            if (k == 27 || k == 'q') {
+                break;
+            }
+        }
+        delete[] netInData;
+    } catch (const rs2::error &e) {
+        cerr << "RealSense error calling " << e.get_failed_function() << "(" << e.get_failed_args() << "):\n"
+             << "    " << e.what() << endl;
+    } catch (const exception &e) {
+        cerr << e.what() << endl;
+    }
+}
+
 void singleImageInput(network *net, Mat *im, int netInW, int netInH, int netOutW, int netOutH,
                       char **names, image **alphabet, layer lastDetectionLayer) {
     auto *netInData = new float[netInW * netInH * 3]();
@@ -708,7 +755,28 @@ void singleImageInput(network *net, Mat *im, int netInW, int netInH, int netOutW
     waitKey(0);
 }
 
-void workflow(char *dataPath, char *cfgPath, char *weightPath, Mat *im, int benchmarkLayers = 0) {
+void selectMode(network *net, char *mode, int argc, char **argv, int netInW, int netInH, int netOutW, int netOutH,
+                char **names, image **alphabet, layer lastDetectionLayer) {
+    if (strcmp("image", mode) == 0) {
+        if (argc < 6) {
+            cout << "Image mode requires the image path as argument!" << endl;
+            return;
+        }
+        Mat *im = new Mat(imread(argv[5]));
+        if (im->empty()) {
+            cout << "Failed to read image!" << endl;
+            return;
+        }
+        singleImageInput(net, im, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+    } else if (strcmp("camera", mode) == 0) {
+        cameraInput(net, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+    } else if (strcmp("realsense", mode) == 0) {
+        realsenseInput(net, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+    }
+}
+
+void workflow(char *dataPath, char *cfgPath, char *weightPath, char *mode, int argc, char **argv,
+              int benchmarkLayers = 0) {
     // 1. initialize net
     int netInW, netInH, netOutW, netOutH;
     network *net;
@@ -718,192 +786,21 @@ void workflow(char *dataPath, char *cfgPath, char *weightPath, Mat *im, int benc
     initNet(dataPath, cfgPath, weightPath, benchmarkLayers, &netInW, &netInH, &netOutW, &netOutH, &net, &alphabet,
             &names, &lastDetectionLayer);
 
-    if (im == nullptr) {
-        cameraInput(net, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
-    } else {
-        singleImageInput(net, im, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
-    }
-    releaseNet();
-}
+    selectMode(net, mode, argc, argv, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
 
-image mat_to_image(Mat mat) {
-    int w = mat.cols;
-    int h = mat.rows;
-    int c = mat.channels();
-    image im = make_image(w, h, c);
-    unsigned char *data = (unsigned char *) mat.data;
-    int step = mat.step;
-    for (int y = 0; y < h; ++y) {
-        for (int k = 0; k < c; ++k) {
-            for (int x = 0; x < w; ++x) {
-                //uint8_t val = mat.ptr<uint8_t>(y)[c * x + k];
-                //uint8_t val = mat.at<Vec3b>(y, x).val[k];
-                //im.data[k*w*h + y*w + x] = val / 255.0f;
-
-                im.data[k * w * h + y * w + x] = data[y * step + x * c + k] / 255.0f;
-            }
-        }
-    }
-    return im;
-}
-
-void yoloWorkflow(char *_dataCfg, char *_cfgFile, char *_weightFile, Mat *im, float thresh = 0.25,
-                  float hier_thresh = 0.5, int benchmark_layers = 0, int printDetections = 1, int letterBox = 0) {
-    list *options = read_data_cfg(_dataCfg);
-    char *name_list = option_find_str(options, (char *) "names", (char *) "data/names.list");
-    int names_size = 0;
-    char **names = get_labels_custom(name_list, &names_size);  // get_labels(name_list);
-
-    image **alphabet = load_alphabet();
-    network *netPtr = load_network_custom_verbose(_cfgFile, _weightFile, 0, 1, 0);
-    network net = *netPtr;
-
-    net.benchmark_layers = benchmark_layers;
-    fuse_conv_batchnorm(net);
-    calculate_binary_weights(net);
-    if (net.layers[net.n - 1].classes != names_size) {
-        printf("\n Error: in the file %s number of names %d that isn't equal to classes=%d in the file %s \n",
-               name_list, names_size, net.layers[net.n - 1].classes, _cfgFile);
-        if (net.layers[net.n - 1].classes > names_size) getchar();
-    }
-    srand(2222222);
-
-    int j;
-    float nms = .45;    // 0.4F
-
-    int netInW = net.w, netInH = net.h;
-    cout << "Network width = " << netInW << ", height = " << netInW << endl;
-    auto *netInData = new float[netInW * netInH * 3]();
-    float scale;
-    cout << "Image width = " << im->cols << ", height = " << im->rows << endl;
-    // preProcessImage(netInData, *im, netInW, netInH, scale, true);
-    cv::cvtColor(*im, *im, cv::COLOR_RGB2BGR);
-    image sized, displayImage = mat_to_image(*im);
-    if (letterBox) {
-        sized = letterbox_image(displayImage, net.w, net.h);
-    } else {
-        sized = resize_image(displayImage, net.w, net.h);
-    }
-
-    layer l = net.layers[net.n - 1];
-    int k;
-    for (k = 0; k < net.n; ++k) {
-        layer lk = net.layers[k];
-        if (lk.type == YOLO || lk.type == GAUSSIAN_YOLO || lk.type == REGION) {
-            l = lk;
-            printf("Detection layer: %d - type = %d\n", k, l.type);
-        }
-    }
-
-    double time = get_time_point();
-    network_predict(net, sized.data);
-    printf("Predicted in %lf milli-seconds.\n", ((double) get_time_point() - time) / 1000);
-
-    int nrBoxes = 0;
-    detection *dets = get_network_boxes(&net, im->cols, im->rows, thresh, hier_thresh, 0, 1, &nrBoxes, letterBox);
-    if (nms) {
-        if (l.nms_kind == DEFAULT_NMS) do_nms_sort(dets, nrBoxes, l.classes, nms);
-        else diounms_sort(dets, nrBoxes, l.classes, nms, l.nms_kind, l.beta_nms);
-    }
-    /*
-    cv::cvtColor(*im, *im, cv::COLOR_BGR2RGB);
-    draw_detections_cv_v3((void **) &im, dets, nrBoxes, thresh, names, alphabet, l.classes, printDetections);
-    imshow("predictions", *im);
-    /*/
-    draw_detections_v3(displayImage, dets, nrBoxes, thresh, names, alphabet, l.classes, printDetections);
-    show_image(displayImage, "predictions");
-    //*/
-
-    free_detections(dets, nrBoxes);
-
-    wait_until_press_key_cv();
-    destroy_all_windows_cv();
-
-    delete[] netInData;
-    free_network(net);
-}
-
-void yoloWorkflowV1(char *_dataCfg, char *_cfgFile, char *_weightFile, Mat *im, float thresh = 0.25,
-                    float hier_thresh = 0.5, int benchmark_layers = 0, int printDetections = 1, int letterBox = 0) {
-    int netInW, netInH, netOutW, netOutH;
-    network *net;
-    layer lastDetectionLayer;
-    char **names;
-    image **alphabet;
-    initNet(_dataCfg, _cfgFile, _weightFile, benchmark_layers, &netInW, &netInH, &netOutW, &netOutH, &net, &alphabet,
-            &names, &lastDetectionLayer);
-
-    int j;
-    float nms = .45;    // 0.4F
-
-    auto *netInData = new float[netInW * netInH * 3]();
-    float scale;
-    preProcessImage(netInData, *im, netInW, netInH, scale, true);
-
-    double time = get_time_point();
-    runNet(netInData);
-    // network_predict(net, netInData);
-    printf("Predicted in %lf milli-seconds.\n", ((double) get_time_point() - time) / 1000);
-
-    int nrBoxes = 0;
-    detection *dets = get_network_boxes(net, im->cols, im->rows, thresh, hier_thresh, 0, 1, &nrBoxes, letterBox);
-    if (nms) {
-        if (lastDetectionLayer.nms_kind == DEFAULT_NMS) {
-            do_nms_sort(dets, nrBoxes, lastDetectionLayer.classes, nms);
-        } else {
-            diounms_sort(dets, nrBoxes, lastDetectionLayer.classes, nms, lastDetectionLayer.nms_kind,
-                         lastDetectionLayer.beta_nms);
-        }
-    }
-    // scale detections
-    for (int i = 0; i < nrBoxes; i++) {
-        float xScale = (scale * (float) netInW) / ((float) im->cols);
-        dets[i].bbox.x *= xScale;
-        dets[i].bbox.w *= xScale;
-        float yScale = (scale * (float) netInH) / ((float) im->rows);
-        dets[i].bbox.y *= yScale;
-        dets[i].bbox.h *= yScale;
-    }
-
-    draw_detections_cv_v3((void **) &im, dets, nrBoxes, thresh, names, alphabet, lastDetectionLayer.classes,
-                          printDetections);
-    imshow("predictions", *im);
-
-    free_detections(dets, nrBoxes);
-
-    wait_until_press_key_cv();
-    destroy_all_windows_cv();
-
-    // free memory
-    delete[] netInData;
     releaseNet();
 }
 
 int main(int ac, char **av) {
-    if (ac != 5 && ac != 4) {
-        cout << "usage 1: ./program [data cfg] [cfg file] [weight file]" << endl;
-        cout << "usage 2: ./program [data cfg] [cfg file] [weight file] [image file]" << endl;
+    if (ac < 5) {
+        cout << "usage: ./program [data cfg] [cfg file] [weight file] [mode] [mode arguments]" << endl;
         return 1;
     }
 
-    // 1. read args
     char *dataCfg = av[1];
     char *netCfg = av[2];
     char *weightFile = av[3];
-    Mat *im = nullptr;
-    if (ac == 5) {
-        im = new Mat(imread(av[4]));
-        if (im->empty()) {
-            cout << "failed to read image" << endl;
-            return 1;
-        }
-    }
-
-    /*
-    yoloWorkflowV1(dataCfg, netCfg, weightFile, im);
-    /*/
-    cout << endl << endl;
-    workflow(dataCfg, netCfg, weightFile, im);
-    //*/
+    char *mode = av[4];
+    workflow(dataCfg, netCfg, weightFile, mode, ac, av);
     return 0;
 }
