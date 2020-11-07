@@ -484,7 +484,7 @@ int main
     int net_inh = 0;
     int net_outw = 0;
     int net_outh = 0;
-    initNet(cfg_path, weight_path, &net_inw, &net_inh, &net_outw, &net_outh);
+    initNet("", cfg_path, weight_path, 0, &net_inw, &net_inh, &net_outw, &net_outh);
 
     // 3. resize to net input size, put scaled image on the top left
     float scale = 0.0f;
