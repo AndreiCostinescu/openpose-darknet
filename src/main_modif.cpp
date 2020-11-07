@@ -425,7 +425,7 @@ class OpenposePostProcessor {
     static void postProcess(Mat &image, float *output, int netInW, int netInH, int netOutW, int netOutH, float scale) {
         initialize();
 
-        cout << "Resize net output back to input size..." << endl;
+        // cout << "Resize net output back to input size..." << endl;
         // 7. resize net output back to input size to get heatMap
         auto *heatMap = new float[netInW * netInH * OpenposePostProcessor::NET_OUT_CHANNELS];
         for (int i = 0; i < OpenposePostProcessor::NET_OUT_CHANNELS; ++i) {
@@ -434,22 +434,23 @@ class OpenposePostProcessor {
             resize(netOut, nmsin, Size(netInW, netInH), 0, 0, INTER_CUBIC);
         }
 
-        cout << "Finding heatMap peaks..." << endl;
+        // cout << "Finding heatMap peaks..." << endl;
         // 8. get heatMap peaks
         auto heatMapSize = 3 * (POSE_MAX_PEOPLE + 1) * (OpenposePostProcessor::NET_OUT_CHANNELS - 1);
-        cout << "heatMapSize = " << heatMapSize << endl;
+        // cout << "heatMapSize = " << heatMapSize << endl;
         auto *heatMapPeaks = new float[heatMapSize];
         OpenposePostProcessor::findHeatmapPeaks(heatMap, heatMapPeaks, netInW, netInH,
                                                 OpenposePostProcessor::NET_OUT_CHANNELS, 0.05);
 
-        cout << "Linking parts..." << endl;
+        // cout << "Linking parts..." << endl;
         // 9. link parts
         vector<float> keyPoints;
         vector<int> shape;
         OpenposePostProcessor::connectBodyparts(keyPoints, heatMap, heatMapPeaks, netInW, netInH, 9, 0.05, 6, 0.4,
                                                 shape);
 
-        cout << "Key Points:" << endl;
+        // cout << "Key Points:" << endl;
+        /*
         for (float keyPoint : keyPoints) {
             cout << keyPoint << ", ";
         }
@@ -458,13 +459,14 @@ class OpenposePostProcessor {
             cout << shapePoint << ", ";
         }
         cout << endl;
-        cout << "Drawing result..." << endl;
+        //*/
+        // cout << "Drawing result..." << endl;
         // 10. draw result
         OpenposePostProcessor::renderPoseKeyPoints(image, keyPoints, shape, 0.05, scale);
 
-        cout << "Showing result..." << endl;
+        // cout << "Showing result..." << endl;
         // 11. show result
-        cout << "people: " << shape[0] << endl;
+        // cout << "people: " << shape[0] << endl;
 
         delete[] heatMapPeaks;
         delete[] heatMap;
@@ -620,20 +622,24 @@ Mat createNetSizeImage(const Mat &im, const int netW, const int netH, float &sca
 #pragma ide diagnostic ignored "hicpp-signed-bitwise"
 
 void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float &scale, bool yolo = false) {
-    cout << "Resize image to net input..." << endl;
+    // cout << "Resize image to net input..." << endl;
     // 3. resize to net input size, put scaled image on the top left
     Mat netIm = createNetSizeImage(image, netInW, netInH, scale);
 
-    cout << "Normalize input image..." << endl;
+    // cout << "Normalize input image..." << endl;
     // 4. normalized to float type
     cv::cvtColor(netIm, netIm, cv::COLOR_RGB2BGR);
+    //*
+    netIm.convertTo(netIm, CV_32F);
+    /*/
     if (yolo) {
         netIm.convertTo(netIm, CV_32F, 1 / 255.f, 0.0);
     } else {
         netIm.convertTo(netIm, CV_32F, 1 / 256.f, -0.5);
     }
+    //*/
 
-    cout << "Splitting image channels..." << endl;
+    // cout << "Splitting image channels..." << endl;
     // 5. split channels
     float *netInDataPtr = netInput;
     vector<Mat> inputChannels;
@@ -649,12 +655,12 @@ void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float 
 
 void processImage(network *net, float *netInput, Mat &imageInput, layer lastDetectionLayer,
                   int netInW, int netInH, int netOutW, int netOutH, float scale, char **names, image **alphabet) {
-    cout << "Feeding forward through network..." << endl;
+    // cout << "Feeding forward through network..." << endl;
     // 6. feed forward
     double timeBegin = getTickCount();
     float *netOutData = runNet(netInput);
     double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
-    cout << "forward fee: " << feeTime << "ms" << endl;
+    // cout << "forward fee: " << feeTime << "ms" << endl;
 
     OpenposePostProcessor::postProcess(imageInput, netOutData, netInW, netInH, netOutW, netOutH, scale);
     YoloPostProcessor::postProcess(net, imageInput, lastDetectionLayer, netInW, netInH, scale, names, alphabet);
@@ -744,7 +750,7 @@ image mat_to_image(Mat mat) {
 void yoloWorkflow(char *_dataCfg, char *_cfgFile, char *_weightFile, Mat *im, float thresh = 0.25,
                   float hier_thresh = 0.5, int benchmark_layers = 0, int printDetections = 1, int letterBox = 0) {
     list *options = read_data_cfg(_dataCfg);
-    char *name_list = option_find_str(options, "names", "data/names.list");
+    char *name_list = option_find_str(options, (char *) "names", (char *) "data/names.list");
     int names_size = 0;
     char **names = get_labels_custom(name_list, &names_size);  // get_labels(name_list);
 

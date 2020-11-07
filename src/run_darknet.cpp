@@ -20,7 +20,7 @@ void initNet(char *dataFile, char *cfgFile, char *weightFile, int benchmarkLayer
              int *inW, int *inH, int *outW, int *outH, network **_net, image ***_alphabet,
              char ***_names, layer *_lastDetectionLayer) {
     options = read_data_cfg(dataFile);
-    char *name_list = option_find_str(options, "names", "data/names.list");
+    char *name_list = option_find_str(options, (char *) "names", (char *) "data/names.list");
     int names_size = 0;
     names = get_labels_custom(name_list, &names_size);  // get_labels(name_list);
     if (_names != nullptr) {
