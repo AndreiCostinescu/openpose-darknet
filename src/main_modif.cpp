@@ -11,6 +11,12 @@ using namespace std;
 using namespace cv;
 
 #include "run_darknet.h"
+#include <darknet.h>
+#include <utils/option_list.h>
+#include <utils/data.h>
+#include <images/image.h>
+#include <images/image_opencv.h>
+#include <network.h>
 
 #define POSE_MAX_PEOPLE 96
 #define MODEL 0
@@ -70,6 +76,8 @@ class OpenposePostProcessor {
      */
     static void renderPoseKeyPoints(Mat &frame, const vector<float> &keyPoints, vector<int> keyShape,
                                     const float threshold, float scale) {
+        initialize();
+
         const int nrKeyPoints = keyShape[1];
         const int pairs_size = OpenposePostProcessor::BODY_PART_PAIRS.size();
         const int number_colors = OpenposePostProcessor::COLORS.size();
@@ -110,6 +118,8 @@ class OpenposePostProcessor {
             vector<float> &poseKeypoints, const float *const map, const float *const peaks, int mapW, int mapH,
             const int inter_min_above_th, const float inter_th, const int min_subset_cnt, const float min_subset_score,
             vector<int> &keypoint_shape) {
+        initialize();
+
         keypoint_shape.resize(3);
 
         const int num_body_parts = MODEL_SIZE - 1;  // model part number
@@ -348,6 +358,8 @@ class OpenposePostProcessor {
 
     static void findHeatmapPeaks(const float *src, float *dst, const int SRCW, const int SRCH, const int SRC_CH,
                                  const float TH) {
+        initialize();
+
         // find peaks (8-connected neighbor), weights with 7 by 7 area to get sub-pixel location and response
         const int SRC_PLANE_OFFSET = SRCW * SRCH;
         // add 1 for saving total people count, 3 for x, y, score
@@ -410,16 +422,15 @@ class OpenposePostProcessor {
         }
     }
 
-    static void postProcess(Mat image, float *output, int netInW, int netInH, int netOutW, int netOutH, float scale) {
+    static void postProcess(Mat &image, float *output, int netInW, int netInH, int netOutW, int netOutH, float scale) {
+        initialize();
+
         cout << "Resize net output back to input size..." << endl;
         // 7. resize net output back to input size to get heatMap
         auto *heatMap = new float[netInW * netInH * OpenposePostProcessor::NET_OUT_CHANNELS];
         for (int i = 0; i < OpenposePostProcessor::NET_OUT_CHANNELS; ++i) {
-            cout << "At channel i = " << i << endl;
             Mat netOut(netOutH, netOutW, CV_32F, (output + netOutH * netOutW * i));
-            cout << netOut.size << endl;
             Mat nmsin(netInH, netInW, CV_32F, heatMap + netInH * netInW * i);
-            cout << nmsin.size << endl;
             resize(netOut, nmsin, Size(netInW, netInH), 0, 0, INTER_CUBIC);
         }
 
@@ -521,6 +532,65 @@ class OpenposePostProcessor {
 };
 
 int OpenposePostProcessor::INITIALIZED = 0;
+int OpenposePostProcessor::MODEL_SIZE = 0;
+int OpenposePostProcessor::NET_OUT_CHANNELS = 0;
+vector<int> OpenposePostProcessor::POSE_MAP_INDEX;
+vector<int> OpenposePostProcessor::BODY_PART_PAIRS;
+vector<float> OpenposePostProcessor::COLORS;
+
+class YoloPostProcessor {
+  public:
+    YoloPostProcessor() {
+        YoloPostProcessor::initialize();
+    }
+
+    static void postProcess(network *net, Mat &imageInput, layer lastDetectionLayer, int netInW, int netInH,
+                            float scale, char **names, image **alphabet, float thresh = 0.25,
+                            float hierarchyThresh = 0.5, int letterBox = 0, int printDetections = 1) {
+        initialize();
+
+        int nrBoxes = 0;
+        detection *detections = get_network_boxes(net, imageInput.cols, imageInput.rows, thresh, hierarchyThresh, 0, 1,
+                                                  &nrBoxes, letterBox);
+        if (YoloPostProcessor::NMS != 0) {
+            if (lastDetectionLayer.nms_kind == DEFAULT_NMS) {
+                do_nms_sort(detections, nrBoxes, lastDetectionLayer.classes, YoloPostProcessor::NMS);
+            } else {
+                diounms_sort(detections, nrBoxes, lastDetectionLayer.classes, YoloPostProcessor::NMS,
+                             lastDetectionLayer.nms_kind, lastDetectionLayer.beta_nms);
+            }
+        }
+
+        // scale detections
+        for (int i = 0; i < nrBoxes; i++) {
+            float xScale = (scale * (float) netInW) / ((float) imageInput.cols);
+            detections[i].bbox.x *= xScale;
+            detections[i].bbox.w *= xScale;
+            float yScale = (scale * (float) netInH) / ((float) imageInput.rows);
+            detections[i].bbox.y *= yScale;
+            detections[i].bbox.h *= yScale;
+        }
+
+        Mat *imagePtr = &imageInput;
+        draw_detections_cv_v3((void **) &imagePtr, detections, nrBoxes, thresh, names, alphabet,
+                              lastDetectionLayer.classes, printDetections);
+        free_detections(detections, nrBoxes);
+    }
+
+  private:
+    static int INITIALIZED;
+    static float NMS;
+
+    static void initialize() {
+        if (YoloPostProcessor::INITIALIZED) {
+            return;
+        }
+        YoloPostProcessor::INITIALIZED = 1;
+    }
+};
+
+int YoloPostProcessor::INITIALIZED = 0;
+float YoloPostProcessor::NMS = .45;  // 0.4F;
 
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "hicpp-signed-bitwise"
@@ -549,14 +619,19 @@ Mat createNetSizeImage(const Mat &im, const int netW, const int netH, float &sca
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "hicpp-signed-bitwise"
 
-void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, int netOutW, int netOutH, float &scale) {
+void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float &scale, bool yolo = false) {
     cout << "Resize image to net input..." << endl;
     // 3. resize to net input size, put scaled image on the top left
     Mat netIm = createNetSizeImage(image, netInW, netInH, scale);
 
     cout << "Normalize input image..." << endl;
     // 4. normalized to float type
-    netIm.convertTo(netIm, CV_32F, 1 / 256.f, -0.5);
+    cv::cvtColor(netIm, netIm, cv::COLOR_RGB2BGR);
+    if (yolo) {
+        netIm.convertTo(netIm, CV_32F, 1 / 255.f, 0.0);
+    } else {
+        netIm.convertTo(netIm, CV_32F, 1 / 256.f, -0.5);
+    }
 
     cout << "Splitting image channels..." << endl;
     // 5. split channels
@@ -572,7 +647,8 @@ void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, int ne
 
 #pragma clang diagnostic pop
 
-void processImage(float *netInput, Mat &image, int netInW, int netInH, int netOutW, int netOutH, float scale) {
+void processImage(network *net, float *netInput, Mat &imageInput, layer lastDetectionLayer,
+                  int netInW, int netInH, int netOutW, int netOutH, float scale, char **names, image **alphabet) {
     cout << "Feeding forward through network..." << endl;
     // 6. feed forward
     double timeBegin = getTickCount();
@@ -580,12 +656,12 @@ void processImage(float *netInput, Mat &image, int netInW, int netInH, int netOu
     double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
     cout << "forward fee: " << feeTime << "ms" << endl;
 
-    OpenposePostProcessor::postProcess(image, netOutData, netInW, netInH, netOutW, netOutH, scale);
-    // YoloPostProcessor::postProcess(image, netOutData, netInW, netInH, netOutW, netOutH, scale);
+    OpenposePostProcessor::postProcess(imageInput, netOutData, netInW, netInH, netOutW, netOutH, scale);
+    YoloPostProcessor::postProcess(net, imageInput, lastDetectionLayer, netInW, netInH, scale, names, alphabet);
 }
 
-
-void cameraInput(int netInW, int netInH, int netOutW, int netOutH) {
+void cameraInput(network *net, int netInW, int netInH, int netOutW, int netOutH, char **names, image **alphabet,
+                 layer lastDetectionLayer) {
     VideoCapture camera(0);
     if (!camera.isOpened()) {
         cout << "Error!" << endl;
@@ -601,8 +677,8 @@ void cameraInput(int netInW, int netInH, int netOutW, int netOutH) {
         }
 
         float scale = 0.0;
-        preProcessImage(netInData, im, netInW, netInH, netOutW, netOutH, scale);
-        processImage(netInData, im, netInW, netInH, netOutW, netOutH, scale);
+        preProcessImage(netInData, im, netInW, netInH, scale);
+        processImage(net, netInData, im, lastDetectionLayer, netInW, netInH, netOutW, netOutH, scale, names, alphabet);
 
         // 11. show and save result
         imshow("demo", im);
@@ -614,57 +690,214 @@ void cameraInput(int netInW, int netInH, int netOutW, int netOutH) {
     delete[] netInData;
 }
 
-void singleImageInput(Mat *im, int netInW, int netInH, int netOutW, int netOutH) {
+void singleImageInput(network *net, Mat *im, int netInW, int netInH, int netOutW, int netOutH,
+                      char **names, image **alphabet, layer lastDetectionLayer) {
     auto *netInData = new float[netInW * netInH * 3]();
     float scale = 0.0;
-    preProcessImage(netInData, *im, netInW, netInH, netOutW, netOutH, scale);
-    processImage(netInData, *im, netInW, netInH, netOutW, netOutH, scale);
+    preProcessImage(netInData, *im, netInW, netInH, scale);
+    processImage(net, netInData, *im, lastDetectionLayer, netInW, netInH, netOutW, netOutH, scale, names, alphabet);
     delete[] netInData;
 
     imshow("demo", *im);
     waitKey(0);
 }
 
-void workflow(char *cfgPath, char *weightPath, Mat *im) {
+void workflow(char *dataPath, char *cfgPath, char *weightPath, Mat *im, int benchmarkLayers = 0) {
     // 1. initialize net
-    int netInW = 0, netInH = 0, netOutW = 0, netOutH = 0;
-    initNet(cfgPath, weightPath, &netInW, &netInH, &netOutW, &netOutH);
+    int netInW, netInH, netOutW, netOutH;
+    network *net;
+    layer lastDetectionLayer;
+    char **names;
+    image **alphabet;
+    initNet(dataPath, cfgPath, weightPath, benchmarkLayers, &netInW, &netInH, &netOutW, &netOutH, &net, &alphabet,
+            &names, &lastDetectionLayer);
 
     if (im == nullptr) {
-        cameraInput(netInW, netInH, netOutW, netOutH);
+        cameraInput(net, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
     } else {
-        singleImageInput(im, netInW, netInH, netOutW, netOutH);
+        singleImageInput(net, im, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
     }
+    releaseNet();
+}
+
+image mat_to_image(Mat mat) {
+    int w = mat.cols;
+    int h = mat.rows;
+    int c = mat.channels();
+    image im = make_image(w, h, c);
+    unsigned char *data = (unsigned char *) mat.data;
+    int step = mat.step;
+    for (int y = 0; y < h; ++y) {
+        for (int k = 0; k < c; ++k) {
+            for (int x = 0; x < w; ++x) {
+                //uint8_t val = mat.ptr<uint8_t>(y)[c * x + k];
+                //uint8_t val = mat.at<Vec3b>(y, x).val[k];
+                //im.data[k*w*h + y*w + x] = val / 255.0f;
+
+                im.data[k * w * h + y * w + x] = data[y * step + x * c + k] / 255.0f;
+            }
+        }
+    }
+    return im;
+}
+
+void yoloWorkflow(char *_dataCfg, char *_cfgFile, char *_weightFile, Mat *im, float thresh = 0.25,
+                  float hier_thresh = 0.5, int benchmark_layers = 0, int printDetections = 1, int letterBox = 0) {
+    list *options = read_data_cfg(_dataCfg);
+    char *name_list = option_find_str(options, "names", "data/names.list");
+    int names_size = 0;
+    char **names = get_labels_custom(name_list, &names_size);  // get_labels(name_list);
+
+    image **alphabet = load_alphabet();
+    network *netPtr = load_network_custom_verbose(_cfgFile, _weightFile, 0, 1, 0);
+    network net = *netPtr;
+
+    net.benchmark_layers = benchmark_layers;
+    fuse_conv_batchnorm(net);
+    calculate_binary_weights(net);
+    if (net.layers[net.n - 1].classes != names_size) {
+        printf("\n Error: in the file %s number of names %d that isn't equal to classes=%d in the file %s \n",
+               name_list, names_size, net.layers[net.n - 1].classes, _cfgFile);
+        if (net.layers[net.n - 1].classes > names_size) getchar();
+    }
+    srand(2222222);
+
+    int j;
+    float nms = .45;    // 0.4F
+
+    int netInW = net.w, netInH = net.h;
+    cout << "Network width = " << netInW << ", height = " << netInW << endl;
+    auto *netInData = new float[netInW * netInH * 3]();
+    float scale;
+    cout << "Image width = " << im->cols << ", height = " << im->rows << endl;
+    // preProcessImage(netInData, *im, netInW, netInH, scale, true);
+    cv::cvtColor(*im, *im, cv::COLOR_RGB2BGR);
+    image sized, displayImage = mat_to_image(*im);
+    if (letterBox) {
+        sized = letterbox_image(displayImage, net.w, net.h);
+    } else {
+        sized = resize_image(displayImage, net.w, net.h);
+    }
+
+    layer l = net.layers[net.n - 1];
+    int k;
+    for (k = 0; k < net.n; ++k) {
+        layer lk = net.layers[k];
+        if (lk.type == YOLO || lk.type == GAUSSIAN_YOLO || lk.type == REGION) {
+            l = lk;
+            printf("Detection layer: %d - type = %d\n", k, l.type);
+        }
+    }
+
+    double time = get_time_point();
+    network_predict(net, sized.data);
+    printf("Predicted in %lf milli-seconds.\n", ((double) get_time_point() - time) / 1000);
+
+    int nrBoxes = 0;
+    detection *dets = get_network_boxes(&net, im->cols, im->rows, thresh, hier_thresh, 0, 1, &nrBoxes, letterBox);
+    if (nms) {
+        if (l.nms_kind == DEFAULT_NMS) do_nms_sort(dets, nrBoxes, l.classes, nms);
+        else diounms_sort(dets, nrBoxes, l.classes, nms, l.nms_kind, l.beta_nms);
+    }
+    /*
+    cv::cvtColor(*im, *im, cv::COLOR_BGR2RGB);
+    draw_detections_cv_v3((void **) &im, dets, nrBoxes, thresh, names, alphabet, l.classes, printDetections);
+    imshow("predictions", *im);
+    /*/
+    draw_detections_v3(displayImage, dets, nrBoxes, thresh, names, alphabet, l.classes, printDetections);
+    show_image(displayImage, "predictions");
+    //*/
+
+    free_detections(dets, nrBoxes);
+
+    wait_until_press_key_cv();
+    destroy_all_windows_cv();
+
+    delete[] netInData;
+    free_network(net);
+}
+
+void yoloWorkflowV1(char *_dataCfg, char *_cfgFile, char *_weightFile, Mat *im, float thresh = 0.25,
+                    float hier_thresh = 0.5, int benchmark_layers = 0, int printDetections = 1, int letterBox = 0) {
+    int netInW, netInH, netOutW, netOutH;
+    network *net;
+    layer lastDetectionLayer;
+    char **names;
+    image **alphabet;
+    initNet(_dataCfg, _cfgFile, _weightFile, benchmark_layers, &netInW, &netInH, &netOutW, &netOutH, &net, &alphabet,
+            &names, &lastDetectionLayer);
+
+    int j;
+    float nms = .45;    // 0.4F
+
+    auto *netInData = new float[netInW * netInH * 3]();
+    float scale;
+    preProcessImage(netInData, *im, netInW, netInH, scale, true);
+
+    double time = get_time_point();
+    runNet(netInData);
+    // network_predict(net, netInData);
+    printf("Predicted in %lf milli-seconds.\n", ((double) get_time_point() - time) / 1000);
+
+    int nrBoxes = 0;
+    detection *dets = get_network_boxes(net, im->cols, im->rows, thresh, hier_thresh, 0, 1, &nrBoxes, letterBox);
+    if (nms) {
+        if (lastDetectionLayer.nms_kind == DEFAULT_NMS) {
+            do_nms_sort(dets, nrBoxes, lastDetectionLayer.classes, nms);
+        } else {
+            diounms_sort(dets, nrBoxes, lastDetectionLayer.classes, nms, lastDetectionLayer.nms_kind,
+                         lastDetectionLayer.beta_nms);
+        }
+    }
+    // scale detections
+    for (int i = 0; i < nrBoxes; i++) {
+        float xScale = (scale * (float) netInW) / ((float) im->cols);
+        dets[i].bbox.x *= xScale;
+        dets[i].bbox.w *= xScale;
+        float yScale = (scale * (float) netInH) / ((float) im->rows);
+        dets[i].bbox.y *= yScale;
+        dets[i].bbox.h *= yScale;
+    }
+
+    draw_detections_cv_v3((void **) &im, dets, nrBoxes, thresh, names, alphabet, lastDetectionLayer.classes,
+                          printDetections);
+    imshow("predictions", *im);
+
+    free_detections(dets, nrBoxes);
+
+    wait_until_press_key_cv();
+    destroy_all_windows_cv();
+
+    // free memory
+    delete[] netInData;
+    releaseNet();
 }
 
 int main(int ac, char **av) {
-    if (ac != 4 && ac != 3) {
-        cout << "usage 1: ./program [cfg file] [weight file]" << endl;
-        cout << "usage 2: ./program [image file] [cfg file] [weight file]" << endl;
+    if (ac != 5 && ac != 4) {
+        cout << "usage 1: ./program [data cfg] [cfg file] [weight file]" << endl;
+        cout << "usage 2: ./program [data cfg] [cfg file] [weight file] [image file]" << endl;
         return 1;
     }
 
     // 1. read args
-    char *cfg_path;
-    char *weight_path;
-    char *im_path;
-    Mat *im;
-    if (ac == 3) {
-        cfg_path = av[1];
-        weight_path = av[2];
-        im = nullptr;
-    } else {
-        im_path = av[1];
-        cfg_path = av[2];
-        weight_path = av[3];
-        im = new Mat(imread(im_path));
+    char *dataCfg = av[1];
+    char *netCfg = av[2];
+    char *weightFile = av[3];
+    Mat *im = nullptr;
+    if (ac == 5) {
+        im = new Mat(imread(av[4]));
         if (im->empty()) {
             cout << "failed to read image" << endl;
             return 1;
         }
     }
 
-    workflow(cfg_path, weight_path, im);
-
+    /*
+    yoloWorkflowV1(dataCfg, netCfg, weightFile, im);
+    /*/
+    cout << endl << endl;
+    workflow(dataCfg, netCfg, weightFile, im);
+    //*/
     return 0;
 }
