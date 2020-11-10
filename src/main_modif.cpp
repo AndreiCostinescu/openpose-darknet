@@ -425,16 +425,16 @@ public:
         }
     }
 
-    static void postProcess(Mat &image, float *output, int netInW, int netInH, int netOutW, int netOutH, float scale) {
+    static void postProcess(const DarknetNet& net, Mat &image, float *output, float scale) {
         initialize();
 
         // cout << "Resize net output back to input size..." << endl;
         // 7. resize net output back to input size to get heatMap
-        auto *heatMap = new float[netInW * netInH * OpenposePostProcessor::NET_OUT_CHANNELS];
+        auto *heatMap = new float[net.inW * net.inH * OpenposePostProcessor::NET_OUT_CHANNELS];
         for (int i = 0; i < OpenposePostProcessor::NET_OUT_CHANNELS; ++i) {
-            Mat netOut(netOutH, netOutW, CV_32F, (output + netOutH * netOutW * i));
-            Mat nmsin(netInH, netInW, CV_32F, heatMap + netInH * netInW * i);
-            resize(netOut, nmsin, Size(netInW, netInH), 0, 0, INTER_CUBIC);
+            Mat netOut(net.outH, net.outW, CV_32F, (output + net.outH * net.outW * i));
+            Mat nmsin(net.inH, net.inW, CV_32F, heatMap + net.inH * net.inW * i);
+            resize(netOut, nmsin, Size(net.inW, net.inH), 0, 0, INTER_CUBIC);
         }
 
         // cout << "Finding heatMap peaks..." << endl;
@@ -442,14 +442,14 @@ public:
         auto heatMapSize = 3 * (POSE_MAX_PEOPLE + 1) * (OpenposePostProcessor::NET_OUT_CHANNELS - 1);
         // cout << "heatMapSize = " << heatMapSize << endl;
         auto *heatMapPeaks = new float[heatMapSize];
-        OpenposePostProcessor::findHeatmapPeaks(heatMap, heatMapPeaks, netInW, netInH,
+        OpenposePostProcessor::findHeatmapPeaks(heatMap, heatMapPeaks, net.inW, net.inH,
                                                 OpenposePostProcessor::NET_OUT_CHANNELS, 0.05);
 
         // cout << "Linking parts..." << endl;
         // 9. link parts
         vector<float> keyPoints;
         vector<int> shape;
-        OpenposePostProcessor::connectBodyparts(keyPoints, heatMap, heatMapPeaks, netInW, netInH, 9, 0.05, 6, 0.4,
+        OpenposePostProcessor::connectBodyparts(keyPoints, heatMap, heatMapPeaks, net.inW, net.inH, 9, 0.05, 6, 0.4,
                                                 shape);
 
         // cout << "Key Points:" << endl;
@@ -549,36 +549,35 @@ public:
         YoloPostProcessor::initialize();
     }
 
-    static void postProcess(network *net, Mat &imageInput, layer lastDetectionLayer, int netInW, int netInH,
-                            float scale, char **names, image **alphabet, float thresh = 0.25,
+    static void postProcess(const DarknetNet &net, Mat &imageInput, float scale, float thresh = 0.25,
                             float hierarchyThresh = 0.5, int letterBox = 0, int printDetections = 0) {
         initialize();
 
         int nrBoxes = 0;
-        detection *detections = get_network_boxes(net, imageInput.cols, imageInput.rows, thresh, hierarchyThresh, 0, 1,
-                                                  &nrBoxes, letterBox);
+        detection *detections = get_network_boxes(net.net, imageInput.cols, imageInput.rows, thresh, hierarchyThresh,
+                                                  nullptr, 1, &nrBoxes, letterBox);
         if (YoloPostProcessor::NMS != 0) {
-            if (lastDetectionLayer.nms_kind == DEFAULT_NMS) {
-                do_nms_sort(detections, nrBoxes, lastDetectionLayer.classes, YoloPostProcessor::NMS);
+            if (net.lastDetectionLayer.nms_kind == DEFAULT_NMS) {
+                do_nms_sort(detections, nrBoxes, net.lastDetectionLayer.classes, YoloPostProcessor::NMS);
             } else {
-                diounms_sort(detections, nrBoxes, lastDetectionLayer.classes, YoloPostProcessor::NMS,
-                             lastDetectionLayer.nms_kind, lastDetectionLayer.beta_nms);
+                diounms_sort(detections, nrBoxes, net.lastDetectionLayer.classes, YoloPostProcessor::NMS,
+                             net.lastDetectionLayer.nms_kind, net.lastDetectionLayer.beta_nms);
             }
         }
 
         // scale detections
         for (int i = 0; i < nrBoxes; i++) {
-            float xScale = (scale * (float) netInW) / ((float) imageInput.cols);
+            float xScale = (scale * (float) net.inW) / ((float) imageInput.cols);
             detections[i].bbox.x *= xScale;
             detections[i].bbox.w *= xScale;
-            float yScale = (scale * (float) netInH) / ((float) imageInput.rows);
+            float yScale = (scale * (float) net.inH) / ((float) imageInput.rows);
             detections[i].bbox.y *= yScale;
             detections[i].bbox.h *= yScale;
         }
 
         Mat *imagePtr = &imageInput;
-        draw_detections_cv_v3((void ***) &imagePtr, detections, nrBoxes, thresh, names, alphabet,
-                              lastDetectionLayer.classes, printDetections);
+        draw_detections_cv_v3((void ***) &imagePtr, detections, nrBoxes, thresh, net.names, net.alphabet,
+                              net.lastDetectionLayer.classes, printDetections);
         free_detections(detections, nrBoxes);
     }
 
@@ -656,28 +655,36 @@ void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float 
 
 #pragma clang diagnostic pop
 
-void processImage(network *net, float *netInput, Mat &imageInput, layer lastDetectionLayer,
-                  int netInW, int netInH, int netOutW, int netOutH, float scale, char **names, image **alphabet) {
+void processImage(DarknetNet net, float *netInput, Mat &imageInput, float scale) {
+    double timeBegin, feeTime;
+
+    timeBegin = getTickCount();
+    preProcessImage(netInput, imageInput, net.inW, net.inH, scale);
+    feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
+    cout << "pre-process time: " << feeTime << "ms" << endl;
+
     // cout << "Feeding forward through network..." << endl;
     // 6. feed forward
-    double timeBegin = getTickCount();
-    float *netOutData = runNet(netInput);
-    double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
-    cout << "forward fee: " << feeTime << "ms" << endl;
+    timeBegin = getTickCount();
+    float *netOutData = net.runNet(netInput);
+    feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
+    cout << "process time: " << feeTime << "ms" << endl;
 
-    OpenposePostProcessor::postProcess(imageInput, netOutData, netInW, netInH, netOutW, netOutH, scale);
-    YoloPostProcessor::postProcess(net, imageInput, lastDetectionLayer, netInW, netInH, scale, names, alphabet);
+    timeBegin = getTickCount();
+    OpenposePostProcessor::postProcess(net, imageInput, netOutData, scale);
+    YoloPostProcessor::postProcess(net, imageInput, scale);
+    feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
+    cout << "post-process time: " << feeTime << "ms" << endl;
 }
 
-void cameraInput(network *net, int netInW, int netInH, int netOutW, int netOutH, char **names, image **alphabet,
-                 layer lastDetectionLayer) {
+void cameraInput(const DarknetNet& net) {
     VideoCapture camera(0);
     if (!camera.isOpened()) {
         cout << "Error!" << endl;
         return;
     }
     Mat im;
-    auto *netInData = new float[netInW * netInH * 3]();
+    auto *netInData = new float[net.inW * net.inH * 3]();
     while (true) {
         camera.read(im);
         if (im.empty()) {
@@ -686,8 +693,7 @@ void cameraInput(network *net, int netInW, int netInH, int netOutW, int netOutH,
         }
 
         float scale = 0.0;
-        preProcessImage(netInData, im, netInW, netInH, scale);
-        processImage(net, netInData, im, lastDetectionLayer, netInW, netInH, netOutW, netOutH, scale, names, alphabet);
+        processImage(net, netInData, im, scale);
 
         // 11. show and save result
         imshow("demo", im);
@@ -699,8 +705,7 @@ void cameraInput(network *net, int netInW, int netInH, int netOutW, int netOutH,
     delete[] netInData;
 }
 
-void realsenseInput(network *net, int netInW, int netInH, int netOutW, int netOutH, char **names, image **alphabet,
-                    layer lastDetectionLayer) {
+void realsenseInput(const DarknetNet& net) {
     try {
         rs2::pipeline pipe;
         auto config = pipe.start();
@@ -708,7 +713,7 @@ void realsenseInput(network *net, int netInW, int netInH, int netOutW, int netOu
         rs2::align alignTo(RS2_STREAM_COLOR);
         cout << "Started RealSense pipeline!" << endl;
 
-        auto *netInData = new float[netInW * netInH * 3]();
+        auto *netInData = new float[net.inW * net.inH * 3]();
         unsigned long long lastFrameNumber = 0;
         while (true) {
             rs2::frameset currentFrame = pipe.wait_for_frames();
@@ -723,9 +728,7 @@ void realsenseInput(network *net, int netInW, int netInH, int netOutW, int netOu
             auto imageMat = frame_to_mat(image);
 
             float scale = 0.0;
-            preProcessImage(netInData, imageMat, netInW, netInH, scale);
-            processImage(net, netInData, imageMat, lastDetectionLayer, netInW, netInH, netOutW, netOutH, scale, names,
-                         alphabet);
+            processImage(net, netInData, imageMat, scale);
 
             // 11. show and save result
             imshow("demo", imageMat);
@@ -743,20 +746,17 @@ void realsenseInput(network *net, int netInW, int netInH, int netOutW, int netOu
     }
 }
 
-void singleImageInput(network *net, Mat *im, int netInW, int netInH, int netOutW, int netOutH,
-                      char **names, image **alphabet, layer lastDetectionLayer) {
-    auto *netInData = new float[netInW * netInH * 3]();
+void singleImageInput(const DarknetNet& net, Mat *im) {
+    auto *netInData = new float[net.inW * net.inH * 3]();
     float scale = 0.0;
-    preProcessImage(netInData, *im, netInW, netInH, scale);
-    processImage(net, netInData, *im, lastDetectionLayer, netInW, netInH, netOutW, netOutH, scale, names, alphabet);
+    processImage(net, netInData, *im, scale);
     delete[] netInData;
 
     imshow("demo", *im);
     waitKey(0);
 }
 
-void selectMode(network *net, char *mode, int argc, char **argv, int netInW, int netInH, int netOutW, int netOutH,
-                char **names, image **alphabet, layer lastDetectionLayer) {
+void selectMode(const DarknetNet &net, char *mode, int argc, char **argv) {
     if (strcmp("image", mode) == 0) {
         if (argc < 6) {
             cout << "Image mode requires the image path as argument!" << endl;
@@ -767,28 +767,23 @@ void selectMode(network *net, char *mode, int argc, char **argv, int netInW, int
             cout << "Failed to read image!" << endl;
             return;
         }
-        singleImageInput(net, im, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+        singleImageInput(net, im);
     } else if (strcmp("camera", mode) == 0) {
-        cameraInput(net, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+        cameraInput(net);
     } else if (strcmp("realsense", mode) == 0) {
-        realsenseInput(net, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+        realsenseInput(net);
     }
 }
 
 void workflow(char *dataPath, char *cfgPath, char *weightPath, char *mode, int argc, char **argv,
               int benchmarkLayers = 0) {
     // 1. initialize net
-    int netInW, netInH, netOutW, netOutH;
-    network *net;
-    layer lastDetectionLayer;
-    char **names;
-    image **alphabet;
-    initNet(dataPath, cfgPath, weightPath, benchmarkLayers, &netInW, &netInH, &netOutW, &netOutH, &net, &alphabet,
-            &names, &lastDetectionLayer);
+    DarknetNet net(cfgPath, weightPath, dataPath);
+    net.initNet(benchmarkLayers);
 
-    selectMode(net, mode, argc, argv, netInW, netInH, netOutW, netOutH, names, alphabet, lastDetectionLayer);
+    selectMode(net, mode, argc, argv);
 
-    releaseNet();
+    net.releaseNet();
 }
 
 int main(int ac, char **av) {

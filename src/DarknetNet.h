@@ -3,22 +3,21 @@
 
 #include <darknet.h>
 #include <images/image.h>
+#include <utils/list.h>
 #include <iostream>
 #include <vector>
 
 class DarknetNet {
 public:
-    DarknetNet();
+    DarknetNet(char *cfgFile, char *weightFile, char *dataFile = nullptr);
 
-    void initNet(int benchmarkLayers, int *inW = nullptr, int *inH = nullptr, int *outW = nullptr, int *outH = nullptr,
-                 network **_net = nullptr, image ***_alphabet = nullptr, char ***_names = nullptr,
-                 layer *_lastDetectionLayer = nullptr);
+    void initNet(int benchmarkLayers);
 
     float *runNet(float *inData);
 
     void releaseNet();
 
-private:
+    int inW, inH, outW, outH;
     network *net;
     image **alphabet;
     char **names, *data, *cfg, *weight;

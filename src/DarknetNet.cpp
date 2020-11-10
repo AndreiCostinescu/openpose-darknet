@@ -1,32 +1,23 @@
 #include <cstdio>
 #include <cstdlib>
-#include <vector>
 #include <DarknetNet.h>
+#include <network.h>
+#include <utils/option_list.h>
 
 using namespace std;
 
-DarknetNet::DarknetNet(char *dataFile, char *cfgFile, char *weightFile) :
-        data(dataFile), cfg(cfgFile), weight(weightFile) {}
+DarknetNet::DarknetNet(char *cfgFile, char *weightFile, char *dataFile) :
+        cfg(cfgFile), weight(weightFile), data(dataFile)  {}
 
-void DarknetNet::initNet(int benchmarkLayers, int *inW, int *inH, int *outW, int *outH, network **_net,
-                         image ***_alphabet, char ***_names, layer *_lastDetectionLayer) {
+void DarknetNet::initNet(int benchmarkLayers) {
     this->options = read_data_cfg(this->data);
     char *name_list = option_find_str(this->options, (char *) "names", (char *) "data/names.list");
     int names_size = 0;
     this->names = get_labels_custom(name_list, &names_size);  // get_labels(name_list);
-    if (_names != nullptr) {
-        *_names = this->names;
-    }
 
     this->alphabet = load_alphabet();
-    if (_alphabet != nullptr) {
-        *_alphabet = this-alphabet;
-    }
 
     this->net = load_network_custom_verbose(this->cfg, this->weight, 0, 1, 0);
-    if (_net != nullptr) {
-        *_net = this->net;
-    }
     set_batch_network(this->net, 1);
 
     this->net->benchmark_layers = benchmarkLayers;
@@ -40,9 +31,6 @@ void DarknetNet::initNet(int benchmarkLayers, int *inW, int *inH, int *outW, int
             printf("Detection layer: %d - type = %d\n", layerNumber, this->lastDetectionLayer.type);
         }
     }
-    if (_lastDetectionLayer != nullptr) {
-        *_lastDetectionLayer = this->lastDetectionLayer;
-    }
 
     if (this->lastDetectionLayer.classes != names_size) {
         printf("\n Error: in the file %s number of names %d that isn't equal to classes=%d in the file %s \n",
@@ -53,18 +41,10 @@ void DarknetNet::initNet(int benchmarkLayers, int *inW, int *inH, int *outW, int
     }
     srand(2222222);
 
-    if (inW != nullptr) {
-        *inW = this->net->w;
-    }
-    if (inH != nullptr) {
-        *inH = this->net->h;
-    }
-    if (outW != nullptr) {
-        *outW = this->net->layers[this->net->n - 2].out_w;
-    }
-    if (outH != nullptr) {
-        *outH = this->net->layers[this->net->n - 2].out_h;
-    }
+    this->inW = this->net->w;
+    this->inH = this->net->h;
+    this->outW = this->net->layers[this->net->n - 2].out_w;
+    this->outH = this->net->layers[this->net->n - 2].out_h;
 }
 
 float *DarknetNet::runNet(float *inData) {
