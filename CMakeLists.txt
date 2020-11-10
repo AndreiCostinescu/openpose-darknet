@@ -9,10 +9,11 @@ set(DARKNET_LIB "${DARKNET_DIR}/build-release/libdarknet.so")
 
 find_package(realsense2 REQUIRED)
 find_package(OpenCV 4.3 REQUIRED)
+find_package(Threads REQUIRED)
 
 message(STATUS "Adding OpenposeDarknet")
 add_executable(OpenposeDarknet src/main_modif.cpp src/DarknetNet.cpp)
-target_link_libraries(OpenposeDarknet ${DARKNET_LIB} ${realsense2_LIBRARY} ${OpenCV_LIBS})
+target_link_libraries(OpenposeDarknet ${DARKNET_LIB} ${realsense2_LIBRARY} ${OpenCV_LIBS} pthread)
 target_compile_definitions(OpenposeDarknet PRIVATE -DOPENCV)
 target_compile_definitions(OpenposeDarknet PUBLIC -DOPENCV)
 

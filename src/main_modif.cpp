@@ -1,5 +1,7 @@
+#include <atomic>
 #include <iostream>
 #include <cmath>
+#include <thread>
 #include <tuple>
 
 using namespace std;
@@ -20,6 +22,7 @@ using namespace cv;
 
 #include <librealsense2/rs.hpp>  // rs.h is for C; rs.hpp is for C++...
 #include <images/realsense-opencv-helpers.hpp>
+#include <utility>
 
 #define POSE_MAX_PEOPLE 96
 #define MODEL 0
@@ -32,6 +35,16 @@ inline int intRound(const T a) {
 template<typename T>
 inline T fastMin(const T a, const T b) {
     return (a < b ? a : b);
+}
+
+int custom_atomic_load_int(const volatile int *obj) {
+    const volatile auto *ptr_a = (const volatile std::atomic<int> *) obj;
+    return std::atomic_load(ptr_a);
+}
+
+void custom_atomic_store_int(volatile int *obj, int value) {
+    volatile auto *ptr_a = (volatile std::atomic<int> *) obj;
+    std::atomic_store(ptr_a, value);
 }
 
 class OpenposePostProcessor {
@@ -425,7 +438,7 @@ public:
         }
     }
 
-    static void postProcess(const DarknetNet& net, Mat &image, float *output, float scale) {
+    static void postProcess(const DarknetNet &net, Mat &image, float *output, float scale) {
         initialize();
 
         // cout << "Resize net output back to input size..." << endl;
@@ -549,7 +562,7 @@ public:
         YoloPostProcessor::initialize();
     }
 
-    static void postProcess(const DarknetNet &net, Mat &imageInput, float scale, float thresh = 0.25,
+    static void postProcess(const DarknetNet &net, Mat &imageInput, float *output, float scale, float thresh = 0.25,
                             float hierarchyThresh = 0.5, int letterBox = 0, int printDetections = 0) {
         initialize();
 
@@ -624,11 +637,13 @@ Mat createNetSizeImage(const Mat &im, const int netW, const int netH, float &sca
 #pragma ide diagnostic ignored "hicpp-signed-bitwise"
 
 void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float &scale, bool yolo = false) {
-    // cout << "Resize image to net input..." << endl;
+    double timeBegin = getTickCount();
+
+    cout << "Resize image to net input..." << endl;
     // 3. resize to net input size, put scaled image on the top left
     Mat netIm = createNetSizeImage(image, netInW, netInH, scale);
 
-    // cout << "Normalize input image..." << endl;
+    cout << "Normalize input image..." << endl;
     // 4. normalized to float type
     cv::cvtColor(netIm, netIm, cv::COLOR_RGB2BGR);
     //*
@@ -641,7 +656,7 @@ void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float 
     }
     //*/
 
-    // cout << "Splitting image channels..." << endl;
+    cout << "Splitting image channels..." << endl;
     // 5. split channels
     float *netInDataPtr = netInput;
     vector<Mat> inputChannels;
@@ -651,33 +666,138 @@ void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float 
         netInDataPtr += (netInW * netInH);
     }
     split(netIm, inputChannels);
+
+    double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
+    cout << "pre-process time: " << feeTime << "ms" << endl;
 }
 
 #pragma clang diagnostic pop
 
-void processImage(DarknetNet net, float *netInput, Mat &imageInput, float scale) {
-    double timeBegin, feeTime;
+class Workflow {
+public:
+    explicit Workflow(float *netInput, const char *windowName, volatile int *stop) :
+            netInput(netInput), windowName(windowName), stop(stop), processStart(0), postProcessStart(0), scale(0.0) {
+        this->processThread = thread(&Workflow::processThreadFunction, this);
+        this->postProcessThread = thread(&Workflow::postProcessThreadFunction, this);
+        namedWindow(this->windowName);
+    }
 
-    timeBegin = getTickCount();
-    preProcessImage(netInput, imageInput, net.inW, net.inH, scale);
-    feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
-    cout << "pre-process time: " << feeTime << "ms" << endl;
+    ~Workflow() {
+        this->finish();
+    }
 
-    // cout << "Feeding forward through network..." << endl;
-    // 6. feed forward
-    timeBegin = getTickCount();
-    float *netOutData = net.runNet(netInput);
-    feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
-    cout << "process time: " << feeTime << "ms" << endl;
+    void process() {
+        cout << "Entering process function..." << endl;
+        cout << "inputImage = " << this->inputImage << endl;
+        preProcessImage(this->netInput, *(this->inputImage), this->net->inW, this->net->inH, this->scale);
+        cout << "Preprocessed image!" << endl;
 
-    timeBegin = getTickCount();
-    OpenposePostProcessor::postProcess(net, imageInput, netOutData, scale);
-    YoloPostProcessor::postProcess(net, imageInput, scale);
-    feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
-    cout << "post-process time: " << feeTime << "ms" << endl;
-}
+        // cout << "Feeding forward through network..." << endl;
+        // 6. feed forward
+        double timeBegin = getTickCount();
+        this->netOutData = this->net->runNet(this->netInput);
+        double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
+        cout << "process time: " << feeTime << "ms" << endl;
+    }
 
-void cameraInput(const DarknetNet& net) {
+    void postProcess() {
+        if (this->outputImage == nullptr) {
+            return;
+        }
+        cout << "Entering postProcess function..." << endl;
+        double timeBegin = getTickCount();
+        OpenposePostProcessor::postProcess(*(this->net), *(this->outputImage), this->netOutData, this->scale);
+        YoloPostProcessor::postProcess(*(this->net), *(this->outputImage), this->netOutData, this->scale);
+        double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
+        cout << "post-process time: " << feeTime << "ms" << endl;
+    }
+
+    void processThreadFunction() {
+        while (!custom_atomic_load_int(this->stop)) {
+            while (!custom_atomic_load_int(&this->processStart)) {
+                if (custom_atomic_load_int(this->stop)) return;
+                this_thread::yield();
+            }
+
+            cout << "Before calling process..." << endl;
+            this->process();
+            cout << "After called process!" << endl;
+
+            custom_atomic_store_int(&this->processStart, 0);
+        }
+    }
+
+    void postProcessThreadFunction() {
+        while (!custom_atomic_load_int(this->stop)) {
+            while (!custom_atomic_load_int(&this->postProcessStart)) {
+                if (custom_atomic_load_int(this->stop)) return;
+                this_thread::yield();
+            }
+
+            cout << "Before calling postProcess..." << endl;
+            this->postProcess();
+            cout << "After called postProcess!" << endl;
+
+            custom_atomic_store_int(&this->postProcessStart, 0);
+        }
+    }
+
+    static void threadBarrier(volatile int &threadVariable) {
+        while (custom_atomic_load_int(&threadVariable)) {
+            std::chrono::milliseconds duration(Workflow::threadSleepTime);
+            std::this_thread::sleep_for(duration);
+        }
+    }
+
+    bool workflow(Mat inImage, int wait = 1) {
+        cout << "Entering workflow function..." << endl;
+        this->inputImage = new Mat(std::move(inImage));
+        cout << "Created input image!" << endl;
+        cout << "Starting process thread..." << endl;
+        custom_atomic_store_int(&this->processStart, 1);
+        cout << "Starting postProcess thread..." << endl;
+        // custom_atomic_store_int(&this->postProcessStart, 1);
+        cout << "Wait for threads to finish..." << endl;
+        Workflow::threadBarrier(this->processStart);
+        // Workflow::threadBarrier(this->postProcessStart);
+        cout << "Threads finished!" << endl;
+
+        bool result = true;
+        if (this->outputImage != nullptr) {
+            cout << "Before showing image..." << endl;
+            imshow(this->windowName, *(this->outputImage));
+            int key = cv::waitKey(wait);
+            if (key == 27 || key == 'q') {
+                result = false;
+            }
+            delete this->outputImage;
+            this->outputImage = nullptr;
+        }
+        this->outputImage = this->inputImage;
+        return result;
+    }
+
+    void finish() {
+        this->inputImage = nullptr;
+        delete this->outputImage;
+        this->outputImage = nullptr;
+        custom_atomic_store_int(this->stop, 1);
+        this->processThread.join();
+        this->postProcessThread.join();
+        destroyAllWindows();
+    }
+
+private:
+    thread processThread, postProcessThread;
+    static const int threadSleepTime = 1;
+    volatile int *stop, processStart, postProcessStart;
+    const char *windowName;
+    float *netOutData{}, *netInput, scale;
+    DarknetNet *net{};
+    Mat *inputImage{}, *outputImage{};
+};
+
+void cameraInput(const DarknetNet &net) {
     VideoCapture camera(0);
     if (!camera.isOpened()) {
         cout << "Error!" << endl;
@@ -685,27 +805,23 @@ void cameraInput(const DarknetNet& net) {
     }
     Mat im;
     auto *netInData = new float[net.inW * net.inH * 3]();
-    while (true) {
+    volatile int stop = 0;
+    Workflow w(netInData, (const char *) "demo", &stop);
+    while (!custom_atomic_load_int(&stop)) {
         camera.read(im);
         if (im.empty()) {
             cout << "Image empty Error!" << endl;
             return;
         }
 
-        float scale = 0.0;
-        processImage(net, netInData, im, scale);
-
-        // 11. show and save result
-        imshow("demo", im);
-        int k = waitKey(1);
-        if (k == 27 || k == 'q') {
-            break;
+        if (!w.workflow(im)) {
+            custom_atomic_store_int(&stop, 1);
         }
     }
     delete[] netInData;
 }
 
-void realsenseInput(const DarknetNet& net) {
+void realsenseInput(const DarknetNet &net) {
     try {
         rs2::pipeline pipe;
         auto config = pipe.start();
@@ -713,9 +829,14 @@ void realsenseInput(const DarknetNet& net) {
         rs2::align alignTo(RS2_STREAM_COLOR);
         cout << "Started RealSense pipeline!" << endl;
 
-        auto *netInData = new float[net.inW * net.inH * 3]();
         unsigned long long lastFrameNumber = 0;
-        while (true) {
+        auto *netInData = new float[net.inW * net.inH * 3]();
+        volatile int stop;
+        custom_atomic_store_int(&stop, 0);
+        cout << "Initializing workflow..." << endl;
+        Workflow w(netInData, (const char *) "demo", &stop);
+        cout << "Initialized workflow!" << endl;
+        while (!custom_atomic_load_int(&stop)) {
             rs2::frameset currentFrame = pipe.wait_for_frames();
             currentFrame = alignTo.process(currentFrame);  // Make sure the frames are spatially aligned
             // rs2::depth_frame depth = currentFrame.get_depth_frame();
@@ -725,16 +846,11 @@ void realsenseInput(const DarknetNet& net) {
             lastFrameNumber = image.get_frame_number();
 
             // auto depthMat = depth_frame_to_meters(depth);
-            auto imageMat = frame_to_mat(image);
+            auto im = frame_to_mat(image);
 
-            float scale = 0.0;
-            processImage(net, netInData, imageMat, scale);
-
-            // 11. show and save result
-            imshow("demo", imageMat);
-            int k = waitKey(1);
-            if (k == 27 || k == 'q') {
-                break;
+            cout << "Calling workflow..." << endl;
+            if (!w.workflow(im)) {
+                custom_atomic_store_int(&stop, 1);
             }
         }
         delete[] netInData;
@@ -746,14 +862,13 @@ void realsenseInput(const DarknetNet& net) {
     }
 }
 
-void singleImageInput(const DarknetNet& net, Mat *im) {
+void singleImageInput(const DarknetNet &net, Mat &im) {
     auto *netInData = new float[net.inW * net.inH * 3]();
-    float scale = 0.0;
-    processImage(net, netInData, *im, scale);
+    volatile int stop = 0;
+    Workflow w(netInData, "demo", &stop);
+    w.workflow(im, 0);
+    w.finish();
     delete[] netInData;
-
-    imshow("demo", *im);
-    waitKey(0);
 }
 
 void selectMode(const DarknetNet &net, char *mode, int argc, char **argv) {
@@ -762,8 +877,8 @@ void selectMode(const DarknetNet &net, char *mode, int argc, char **argv) {
             cout << "Image mode requires the image path as argument!" << endl;
             return;
         }
-        Mat *im = new Mat(imread(argv[5]));
-        if (im->empty()) {
+        Mat im = imread(argv[5]);
+        if (im.empty()) {
             cout << "Failed to read image!" << endl;
             return;
         }
