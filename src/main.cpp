@@ -9,7 +9,7 @@ using namespace std;
 
 using namespace cv;
 
-#include "run_darknet.h"
+#include "DarknetNet.h"
 
 #define POSE_MAX_PEOPLE 96
 #define NET_OUT_CHANNELS 57 // 38 for pafs, 19 for parts

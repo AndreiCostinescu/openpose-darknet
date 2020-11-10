@@ -10,7 +10,7 @@ using namespace std;
 
 using namespace cv;
 
-#include "run_darknet.h"
+#include <DarknetNet.h>
 #include <darknet.h>
 #include <utils/option_list.h>
 #include <utils/data.h>
@@ -577,7 +577,7 @@ public:
         }
 
         Mat *imagePtr = &imageInput;
-        draw_detections_cv_v3((void **) &imagePtr, detections, nrBoxes, thresh, names, alphabet,
+        draw_detections_cv_v3((void ***) &imagePtr, detections, nrBoxes, thresh, names, alphabet,
                               lastDetectionLayer.classes, printDetections);
         free_detections(detections, nrBoxes);
     }
@@ -663,7 +663,7 @@ void processImage(network *net, float *netInput, Mat &imageInput, layer lastDete
     double timeBegin = getTickCount();
     float *netOutData = runNet(netInput);
     double feeTime = (getTickCount() - timeBegin) / getTickFrequency() * 1000;
-    // cout << "forward fee: " << feeTime << "ms" << endl;
+    cout << "forward fee: " << feeTime << "ms" << endl;
 
     OpenposePostProcessor::postProcess(imageInput, netOutData, netInW, netInH, netOutW, netOutH, scale);
     YoloPostProcessor::postProcess(net, imageInput, lastDetectionLayer, netInW, netInH, scale, names, alphabet);
