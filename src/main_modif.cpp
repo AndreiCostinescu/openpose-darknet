@@ -13,15 +13,11 @@ using namespace std;
 using namespace cv;
 
 #include <DarknetNet.h>
-#include <darknet.h>
-#include <utils/option_list.h>
-#include <utils/data.h>
-#include <images/image.h>
-#include <images/image_opencv.h>
-#include <network.h>
+#include <darknet/darknet.h>
+#include <darknet/images/image_opencv.h>
 
 #include <librealsense2/rs.hpp>  // rs.h is for C; rs.hpp is for C++...
-#include <images/realsense-opencv-helpers.hpp>
+#include <darknet/images/realsense-opencv-helpers.hpp>
 #include <utility>
 
 #define POSE_MAX_PEOPLE 96

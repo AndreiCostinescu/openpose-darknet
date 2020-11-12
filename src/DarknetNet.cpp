@@ -1,8 +1,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <DarknetNet.h>
-#include <network.h>
-#include <utils/option_list.h>
+#include <darknet/network.h>
+#include <darknet/utils/option_list.h>
 
 using namespace std;
 
