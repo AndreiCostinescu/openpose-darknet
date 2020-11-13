@@ -1,24 +1,24 @@
-#include <atomic>
 #include <iostream>
 #include <cmath>
 #include <thread>
 #include <tuple>
 
-using namespace std;
-
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
-using namespace cv;
+#include <librealsense2/rs.hpp>  // rs.h is for C; rs.hpp is for C++...
 
 #include <DarknetNet.h>
-#include <darknet/darknet.h>
-#include <darknet/images/image_opencv.h>
 
-#include <librealsense2/rs.hpp>  // rs.h is for C; rs.hpp is for C++...
+#include <darknet/images/image_opencv.h>
+#include <darknet/images/http_stream.h>
 #include <darknet/images/realsense-opencv-helpers.hpp>
+
 #include <utility>
+
+using namespace cv;
+using namespace std;
 
 #define POSE_MAX_PEOPLE 96
 #define MODEL 0
@@ -31,16 +31,6 @@ inline int intRound(const T a) {
 template<typename T>
 inline T fastMin(const T a, const T b) {
     return (a < b ? a : b);
-}
-
-int custom_atomic_load_int(const volatile int *obj) {
-    const volatile auto *ptr_a = (const volatile std::atomic<int> *) obj;
-    return std::atomic_load(ptr_a);
-}
-
-void custom_atomic_store_int(volatile int *obj, int value) {
-    volatile auto *ptr_a = (volatile std::atomic<int> *) obj;
-    std::atomic_store(ptr_a, value);
 }
 
 class OpenposePostProcessor {
@@ -626,11 +616,6 @@ Mat createNetSizeImage(const Mat &im, const int netW, const int netH, float &sca
     resize(im, dst(dst_area), Size(newW, newH));
     return dst;
 }
-
-#pragma clang diagnostic pop
-
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "hicpp-signed-bitwise"
 
 void preProcessImage(float *netInput, Mat &image, int netInW, int netInH, float &scale, bool yolo = false) {
     // cout << "Enter preProcessImage..." << endl;
